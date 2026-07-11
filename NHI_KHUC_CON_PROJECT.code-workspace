@@ -1,0 +1,12 @@
+{
+    "folders": [
+		{
+			"name": "ESP32_nhan",
+			"path": "Nhan_tin_hieu_ESP32/ESP32_nhan"
+		},
+		{
+			"name": "EPS32_C3_gui",
+			"path": "Gui_tin_hieu_ESP32_C3/EPS32_C3_gui"
+		}
+	]
+}
