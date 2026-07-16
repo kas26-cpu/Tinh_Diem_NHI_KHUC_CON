@@ -2,14 +2,8 @@
   ESP32-C3 SuperMini + MPU6050 + ESP-NOW
   Arduino ESP32 Core 3.3.10 / PlatformIO
 
-  CHON FIRMWARE TRUOC KHI NAP:
-    DEVICE_ROLE = ROLE_SENSOR : Node MPU6050 gui du lieu ESP-NOW.
-    DEVICE_ROLE = ROLE_SERVER : Server nhan va chuyen tiep qua USB Serial.
-  Neu la SENSOR, chon TEAM_ID = TEAM_RED hoac TEAM_BLUE.
-
-  Server co hai che do Serial:
-    SERVER_TEXT_DEBUG = 0 : bridge nhi phan SLIP, dung voi phan mem laptop.
-    SERVER_TEXT_DEBUG = 1 : chi in thong ke de xem bang Serial Monitor.
+  FIRMWARE CHỈ GỬI TÍN HIỆU (SENSOR)
+  Chon TEAM_ID = TEAM_RED hoac TEAM_BLUE.
 
   GIAI THICH CAC THAY DOI GIAM NHIET (v2):
   1. SENSOR_WIFI_PS_MODE doi thanh WIFI_PS_NONE:
@@ -37,16 +31,9 @@
 // CAU HINH NGUOI DUNG
 // ============================================================================
 
-#define ROLE_SENSOR 1
-#define ROLE_SERVER 2
-
 #define TEAM_NONE 0
 #define TEAM_RED 1
 #define TEAM_BLUE 2
-
-#ifndef DEVICE_ROLE
-#define DEVICE_ROLE ROLE_SENSOR
-#endif
 
 #ifndef TEAM_ID
 #define TEAM_ID TEAM_BLUE
@@ -54,10 +41,6 @@
 
 #ifndef SENSOR_SERIAL_DEBUG
 #define SENSOR_SERIAL_DEBUG 1
-#endif
-
-#ifndef SERVER_TEXT_DEBUG
-#define SERVER_TEXT_DEBUG 0
 #endif
 
 // Giam xung nhip CPU va cho phep modem sleep de giam sinh nhiet.
@@ -202,8 +185,6 @@ void advanceDeadline(uint32_t now, uint32_t period, uint32_t &deadline)
 // ============================================================================
 // FIRMWARE SENSOR
 // ============================================================================
-
-#if DEVICE_ROLE == ROLE_SENSOR
 
 static_assert(TEAM_ID == TEAM_RED || TEAM_ID == TEAM_BLUE,
               "TEAM_ID must be TEAM_RED or TEAM_BLUE for a sensor");
@@ -534,239 +515,16 @@ void loopSensor()
   delayMicroseconds(SENSOR_IDLE_DELAY_US);
 }
 
-#endif // DEVICE_ROLE == ROLE_SENSOR
-
-// ============================================================================
-// FIRMWARE SERVER
-// ============================================================================
-
-#if DEVICE_ROLE == ROLE_SERVER
-
-const uint32_t SERVER_SERIAL_BAUD = 921600;
-
-const uint16_t MAX_ESPNOW_PACKET_SIZE = 250;
-const uint8_t RX_QUEUE_SIZE = 24;
-
-const uint8_t SLIP_END = 0xC0;
-const uint8_t SLIP_ESC = 0xDB;
-const uint8_t SLIP_ESC_END = 0xDC;
-const uint8_t SLIP_ESC_ESC = 0xDD;
-
-struct ReceivedFrame
-{
-  uint16_t length;
-  uint8_t data[MAX_ESPNOW_PACKET_SIZE];
-};
-
-// Khai bao thu cong de Arduino IDE khong dat prototype truoc struct.
-bool getNextReceivedFrame(ReceivedFrame &frame);
-
-ReceivedFrame rx_queue[RX_QUEUE_SIZE];
-
-volatile uint8_t rx_head = 0;
-volatile uint8_t rx_tail = 0;
-volatile uint32_t received_packet_count = 0;
-volatile uint32_t dropped_packet_count = 0;
-
-portMUX_TYPE rx_mux = portMUX_INITIALIZER_UNLOCKED;
-
-uint16_t last_received_length = 0;
-uint32_t last_server_debug_ms = 0;
-
-// Callback dung cho Arduino ESP32 Core 3.3.10.
-void onESPNowReceive(const esp_now_recv_info_t *info,
-                     const uint8_t *data,
-                     int length)
-{
-  (void)info;
-
-  if (data == nullptr || length <= 0 || length > MAX_ESPNOW_PACKET_SIZE)
-  {
-    return;
-  }
-
-  portENTER_CRITICAL(&rx_mux);
-
-  uint8_t next_head = (rx_head + 1) % RX_QUEUE_SIZE;
-  received_packet_count++;
-
-  if (next_head == rx_tail)
-  {
-    dropped_packet_count++;
-  }
-  else
-  {
-    rx_queue[rx_head].length = length;
-    memcpy(rx_queue[rx_head].data, data, length);
-    rx_head = next_head;
-  }
-
-  portEXIT_CRITICAL(&rx_mux);
-}
-
-bool getNextReceivedFrame(ReceivedFrame &frame)
-{
-  bool available = false;
-
-  portENTER_CRITICAL(&rx_mux);
-
-  if (rx_tail != rx_head)
-  {
-    frame = rx_queue[rx_tail];
-    rx_tail = (rx_tail + 1) % RX_QUEUE_SIZE;
-    available = true;
-  }
-
-  portEXIT_CRITICAL(&rx_mux);
-  return available;
-}
-
-void writeSLIPFrame(const uint8_t *data, size_t length)
-{
-  // Truong hop xau nhat: moi byte thanh 2 byte, cong 2 delimiter.
-  uint8_t encoded[MAX_ESPNOW_PACKET_SIZE * 2 + 2];
-  size_t output_length = 0;
-
-  encoded[output_length++] = SLIP_END;
-
-  for (size_t i = 0; i < length; i++)
-  {
-    if (data[i] == SLIP_END)
-    {
-      encoded[output_length++] = SLIP_ESC;
-      encoded[output_length++] = SLIP_ESC_END;
-    }
-    else if (data[i] == SLIP_ESC)
-    {
-      encoded[output_length++] = SLIP_ESC;
-      encoded[output_length++] = SLIP_ESC_ESC;
-    }
-    else
-    {
-      encoded[output_length++] = data[i];
-    }
-  }
-
-  encoded[output_length++] = SLIP_END;
-  Serial.write(encoded, output_length);
-}
-
-bool startESPNowServer()
-{
-  WiFi.mode(WIFI_STA);
-  WiFi.disconnect();
-
-  // Giam cong suat phat song ESP-NOW (Du la Server cung nen ha de giam nhiet)
-  WiFi.setTxPower(WIFI_POWER_8_5dBm);
-
-  esp_wifi_set_ps(WIFI_PS_NONE);
-
-  if (esp_wifi_set_channel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE) != ESP_OK)
-  {
-    return false;
-  }
-
-  if (esp_now_init() != ESP_OK)
-  {
-    return false;
-  }
-
-  if (esp_now_register_recv_cb(onESPNowReceive) != ESP_OK)
-  {
-    esp_now_deinit();
-    return false;
-  }
-
-  return true;
-}
-
-void setupServer()
-{
-  Serial.begin(SERVER_SERIAL_BAUD);
-  delay(200);
-
-  while (!startESPNowServer())
-  {
-#if SERVER_TEXT_DEBUG
-    Serial.println("ESP-NOW server init failed. Retrying...");
-#endif
-    delay(500);
-  }
-
-#if SERVER_TEXT_DEBUG
-  Serial.println();
-  Serial.println("=== ESP32-C3 ESP-NOW SERVER DEBUG ===");
-  Serial.print("Server STA MAC: ");
-  Serial.println(WiFi.macAddress());
-  Serial.print("Expected MAC: 70:4B:CA:26:3A:50");
-  Serial.println();
-  Serial.print("ESP-NOW channel: ");
-  Serial.println(ESPNOW_CHANNEL);
-  Serial.println("Text debug mode: binary forwarding is disabled.");
-#endif
-}
-
-void loopServer()
-{
-  ReceivedFrame frame;
-
-  while (getNextReceivedFrame(frame))
-  {
-    last_received_length = frame.length;
-
-#if !SERVER_TEXT_DEBUG
-    // Server khong phan tich du lieu, chi dong khung va chuyen tiep nguyen ban.
-    writeSLIPFrame(frame.data, frame.length);
-#endif
-  }
-
-#if SERVER_TEXT_DEBUG
-  if (millis() - last_server_debug_ms >= 1000)
-  {
-    uint32_t received;
-    uint32_t dropped;
-
-    portENTER_CRITICAL(&rx_mux);
-    received = received_packet_count;
-    dropped = dropped_packet_count;
-    portEXIT_CRITICAL(&rx_mux);
-
-    Serial.print("Received:");
-    Serial.print(received);
-    Serial.print(",Dropped:");
-    Serial.print(dropped);
-    Serial.print(",LastLength:");
-    Serial.println(last_received_length);
-
-    last_server_debug_ms = millis();
-  }
-#endif
-
-  delay(1);
-}
-
-#endif // DEVICE_ROLE == ROLE_SERVER
-
 // ============================================================================
 // ARDUINO ENTRY POINTS
 // ============================================================================
 
 void setup()
 {
-#if DEVICE_ROLE == ROLE_SENSOR
   setupSensor();
-#elif DEVICE_ROLE == ROLE_SERVER
-  setupServer();
-#else
-#error "DEVICE_ROLE must be ROLE_SENSOR or ROLE_SERVER"
-#endif
 }
 
 void loop()
 {
-#if DEVICE_ROLE == ROLE_SENSOR
   loopSensor();
-#elif DEVICE_ROLE == ROLE_SERVER
-  loopServer();
-#endif
 }
